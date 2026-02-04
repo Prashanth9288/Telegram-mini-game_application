@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useTelegram } from './TelegramContext.js';
 import { database } from '../services/FirebaseConfig.js';
-import { ref, get, update, set, onValue } from 'firebase/database';
+import { ref, get, update, set, onValue, runTransaction } from 'firebase/database';
 
 const ReferralContext = createContext();
 export const useReferral = () => useContext(ReferralContext);
@@ -17,43 +17,70 @@ export const ReferralProvider = ({ children }) => {
 
   // DB updates - wrapped in useCallback
   const updateScores = React.useCallback(async (refId, amount) => {
-    // Update network_score
-    const scoreRef = ref(database, `users/${refId}/Score/network_score`);
-    const snap = await get(scoreRef);
-    const curr = snap.exists() ? snap.val() : 0;
-    await set(scoreRef, curr + amount);
-
-    // Update total_score
-    const totalRef = ref(database, `users/${refId}/Score/total_score`);
-    const totalSnap = await get(totalRef);
-    const tot = totalSnap.exists() ? totalSnap.val() : 0;
-    await set(totalRef, tot + amount);
+    // ATOMIC UPDATE: Prevent race conditions on score
+    const scoreRef = ref(database, `users/${refId}/Score`);
+    await runTransaction(scoreRef, (currentScore) => {
+      if (!currentScore) {
+         return { network_score: amount, total_score: amount };
+      }
+      return {
+        ...currentScore,
+        network_score: (currentScore.network_score || 0) + amount,
+        total_score: (currentScore.total_score || 0) + amount
+      };
+    });
   }, []);
 
   const addReferralRecord = React.useCallback(async (referrerId, referredId) => {
-    const referrerUserRef = ref(database, `users/${referrerId}`);
-    const userSnap = await get(referrerUserRef);
-
-    let referrerName = "Unknown";
-
-    if (!userSnap.exists()) {
-      await set(referrerUserRef, {
-        referrals: {}
-      });
-    } else {
-      referrerName = userSnap.val().name || "Unknown";
-    }
-    // Add to referrer list and award
-    const refRef = ref(database, `users/${referrerId}/referrals`);
-    const snap = await get(refRef);
-    const list = snap.val() || {};
-    const exists = Object.values(list).includes(referredId);
-    if (exists) return;
-    const idx = Object.keys(list).length + 1;
-    await update(refRef, { [idx]: referredId });
-
-    // Store "Referred By" details in the new user's record
+    // GUARD 1: Idempotency Check (DB Level)
+    // Prevent processing if user was already referred, even if local storage is clear.
     const referredUserRef = ref(database, `users/${referredId}`);
+    const userSnap = await get(referredUserRef);
+    if (userSnap.exists() && userSnap.val().referredBy) {
+       console.log("User already processed referral.");
+       return; 
+    }
+
+    // Fetch Referrer Name (Safe Read)
+    const referrerUserRef = ref(database, `users/${referrerId}`);
+    const referrerSnap = await get(referrerUserRef);
+    const referrerName = referrerSnap.exists() ? (referrerSnap.val().name || "Unknown") : "Unknown";
+
+    // GUARD 2 & WRITE: Atomic Add to Referrer List
+    const refRef = ref(database, `users/${referrerId}/referrals`);
+    let alreadyLinked = false;
+
+    await runTransaction(refRef, (currentReferrals) => {
+       // If null, start object
+       if (!currentReferrals) {
+          return { 1: referredId };
+       }
+       
+       const list = Object.values(currentReferrals);
+       if (list.includes(referredId)) {
+          alreadyLinked = true;
+          return; // Abort transaction, no change
+       }
+
+       // Atomic Append
+       const nextIdx = list.length + 1;
+       return {
+          ...currentReferrals,
+          [nextIdx]: referredId
+       };
+    });
+
+    if (alreadyLinked) {
+        console.log("Referral link already exists.");
+        // We still tag the user if missing, or just return?
+        // Safer to return to avoid double points if the list had them but tag didn't.
+        // But let's proceed to tag/reward ONLY if we haven't already rewarded.
+        // Since we checked 'referredBy' above, we are safe to proceed if list add was successful OR if inconsistency exists.
+        // Actually, if 'alreadyLinked' is true, it means referrer has them. We should probably stop to prevent double reward.
+        return;
+    }
+
+    // Write: Tag the new user
     await update(referredUserRef, {
       referralSource: "Invite",
       referredBy: {
@@ -63,6 +90,7 @@ export const ReferralProvider = ({ children }) => {
     });
 
     // Award: referrer 100, referred 50
+    // These are now safe atomic increments
     await updateScores(referrerId, 100);
     await updateScores(referredId, 50);
   }, [updateScores]);

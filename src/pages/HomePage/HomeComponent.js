@@ -28,14 +28,14 @@ import WelcomePopup from "../NetworkPage/WelcomePopup";
 
 export default function HomeComponent() {
   const navigate = useNavigate();
-  const { user, scores } = useTelegram();
+  const { user, scores, tasks, userTasks } = useTelegram();
   const { showWelcomePopup, setShowWelcomePopup } = useReferral();
 
   const { currentStreak } = useStreak();
 
-  // Tasks Fetching
-  const [tasks, setTasks] = useState([]);
-  const [userTasks, setUserTasks] = useState({});
+  // Tasks Fetching (Handled globally now)
+  // const [tasks, setTasks] = useState([]); 
+  // const [userTasks, setUserTasks] = useState({});
 
   // const [newsCount, setNewsCount] = useState(0); // newsCount is used
   const [newsCount, setNewsCount] = useState(0);
@@ -50,8 +50,8 @@ export default function HomeComponent() {
   // Fetch Logic: Listen to aggregates, filter, sort, and fetch details
   useEffect(() => {
     const aggregatesRef = ref(database, "aggregates/top_news_24h");
-    const tasksRef = ref(database, "tasks");
-    const userTasksRef = ref(database, `connections/${user.id}`);
+    // const tasksRef = ref(database, "tasks"); 
+    // const userTasksRef = ref(database, `connections/${user.id}`);
     const newsCountRef = ref(database, `connections/${user.id}/tasks/daily/news`);
 
     // 1. Listen to Aggregates (Real-time)
@@ -117,27 +117,7 @@ export default function HomeComponent() {
       setLoadingNews(false);
     });
 
-    // Existing Listeners
-    const unsubscribeTasks = onValue(tasksRef, (snapshot) => {
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const tasksArray = Object.entries(data).flatMap(([category, categoryTasks]) => {
-          if (!categoryTasks || typeof categoryTasks !== 'object') return [];
-          return Object.entries(categoryTasks).map(([key, task]) => ({
-            ...task,
-            id: task.id || key,
-            category: task.category || category
-          }));
-        });
-        setTasks(tasksArray);
-      } else {
-        setTasks([]);
-      }
-    });
-
-    const unsubscribeUserTasks = onValue(userTasksRef, (snapshot) => {
-      setUserTasks(snapshot.exists() ? snapshot.val() : {});
-    });
+    // Removed Local Tasks/UserTasks Listeners
 
     const unsubscribeNews = onValue(newsCountRef, (snapshot) => {
       setNewsCount(snapshot.exists() ? Object.keys(snapshot.val() || {}).length : 0);
@@ -145,8 +125,8 @@ export default function HomeComponent() {
 
     return () => {
       unsubscribeAggregates();
-      unsubscribeTasks();
-      unsubscribeUserTasks();
+      // unsubscribeTasks();
+      // unsubscribeUserTasks();
       unsubscribeNews();
     };
   }, [user.id]);

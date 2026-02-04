@@ -12,12 +12,14 @@ export const TelegramProvider = ({ children }) => {
   });
 
   const [scores, setScores] = useState(null);
+  const [tasks, setTasks] = useState([]);
+  const [userTasks, setUserTasks] = useState({});
 
   useEffect(() => {
     if (typeof window !== "undefined" && window.Telegram?.WebApp) {
 
       const tg = window.Telegram.WebApp;
-      tg.ready();
+       tg.ready();
       tg.expand();
 
 
@@ -35,13 +37,38 @@ export const TelegramProvider = ({ children }) => {
     }
   }, []);
 
+  // Global Listener for Tasks (Static/Admin data)
+  useEffect(() => {
+    const tasksRef = ref(database, "tasks");
+    const unsubscribe = onValue(tasksRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.val();
+        // Flatten logic
+        const tasksArray = Object.entries(data).flatMap(([category, categoryTasks]) => {
+          if (!categoryTasks || typeof categoryTasks !== 'object') return [];
+          return Object.entries(categoryTasks).map(([key, task]) => ({
+            ...task,
+            id: task.id || key,
+            category: task.category || category
+          }));
+        });
+        setTasks(tasksArray);
+      } else {
+        setTasks([]);
+      }
+    });
+    return () => off(tasksRef, "value", unsubscribe);
+  }, []);
+
+  // Listener for User's Tasks/Scores status
   useEffect(() => {
     if (!user.id) return;
 
     const scoreRef = ref(database, `users/${user.id}/Score`);
+    const userTasksRef = ref(database, `connections/${user.id}`);
 
-    // Listen for real-time updates
-    const unsubscribe = onValue(scoreRef, (snapshot) => {
+    // Listen for real-time scores updates
+    const unsubScore = onValue(scoreRef, (snapshot) => {
       if (snapshot.exists()) {
         setScores(snapshot.val());
       } else {
@@ -49,11 +76,19 @@ export const TelegramProvider = ({ children }) => {
       }
     });
 
+    // Listen for real-time task status updates
+    const unsubUserTasks = onValue(userTasksRef, (snapshot) => {
+      setUserTasks(snapshot.exists() ? snapshot.val() : {});
+    });
+
     // Cleanup function to remove listener when user.id changes or component unmounts
-    return () => off(scoreRef, "value", unsubscribe);
+    return () => {
+       off(scoreRef, "value", unsubScore);
+       off(userTasksRef, "value", unsubUserTasks);
+    };
   }, [user.id]);
 
-  const value = useMemo(() => ({ user, scores }), [user, scores]);
+  const value = useMemo(() => ({ user, scores, tasks, userTasks }), [user, scores, tasks, userTasks]);
 
   return (
     <TelegramContext.Provider value={value}>

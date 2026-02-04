@@ -15,9 +15,10 @@ import { addHistoryLog } from "../../services/addHistory.js";
 const BOT_TOKEN = process.env.REACT_APP_BOT_TOKEN;
 export default function TasksPage() {
 
-  const { user, scores } = useTelegram();
+  /* CONTEXTS */
+  const { user, scores, tasks, userTasks } = useTelegram();
   const { invitedFriends } = useReferral();
-  const [tasks, setTasks] = useState([]);
+  // const [tasks, setTasks] = useState([]); // Context
   const [filterType, setFilterType] = useState("all");
   const navigate = useNavigate();
 
@@ -42,7 +43,7 @@ export default function TasksPage() {
     return () => clearInterval(interval);
   }, [selectedVideo, videoTimer]);
 
-  const [userTasks, setUserTasks] = useState({});
+  // const [userTasks, setUserTasks] = useState({}); // Context
   const [gameCompleted, setGameCompleted] = useState(false);
   const [newsCount, setnewsCount] = useState(0);
   const [localScores, setLocalScores] = useState(null);
@@ -108,39 +109,41 @@ export default function TasksPage() {
   };
 
   useEffect(() => {
-    const tasksRef = ref(database, "tasks");
+    // const tasksRef = ref(database, "tasks"); // Context
     const gameTaskRef = ref(database, `connections/${user.id}/tasks/daily/game`);
     const newsRef = ref(database, `connections/${user.id}/tasks/daily/news`);
+    // const userTasksRef = ref(database, `connections/${user.id}`); // Context
 
-    const unsubscribeTasks = onValue(tasksRef, (snapshot) => {
-      // Logic from lines 52-62
-      if (snapshot.exists()) {
-        const data = snapshot.val();
-        const tasksArray = Object.entries(data).flatMap(([category, categoryTasks]) => {
-          if (!categoryTasks || typeof categoryTasks !== 'object') return [];
-          return Object.entries(categoryTasks).map(([key, task]) => ({
-            ...task,
-            id: task.id || key, // Ensure ID exists
-            category: task.category || category // Fallback to folder name if category property is missing
-          }));
-        });
-        setTasks(tasksArray);
-      } else {
-        setTasks([]);
-      }
-    });
+    // const unsubscribeTasks = onValue(tasksRef, (snapshot) => {
+    //   // Logic from lines 52-62
+    //   if (snapshot.exists()) {
+    //     const data = snapshot.val();
+    //     const tasksArray = Object.entries(data).flatMap(([category, categoryTasks]) => {
+    //       if (!categoryTasks || typeof categoryTasks !== 'object') return [];
+    //       return Object.entries(categoryTasks).map(([key, task]) => ({
+    //         ...task,
+    //         id: task.id || key, // Ensure ID exists
+    //         category: task.category || category // Fallback to folder name if category property is missing
+    //       }));
+    //     });
+    //     setTasks(tasksArray);
+    //   } else {
+    //     setTasks([]);
+    //   }
+    // });
 
     const unsubscribeGame = onValue(gameTaskRef, (snapshot) => {
       setGameCompleted(snapshot.val() === true);
     });
 
     const unsubscribeNews = onValue(newsRef, (snapshot) => {
-      setnewsCount(snapshot.exists() ? Object.keys(snapshot.val() || {}).length : 0);
+      const newsData = snapshot.val();
+      setNewsCount(newsData ? Object.keys(newsData).length : 0);
     });
 
-    const unsubscribeUserTasks = onValue(userTasksRef, (snapshot) => {
-      setUserTasks(snapshot.exists() ? snapshot.val() : {});
-    });
+    // const unsubscribeUserTasks = onValue(userTasksRef, (snapshot) => {
+    //   setUserTasks(snapshot.exists() ? snapshot.val() : {});
+    // });
 
     const unsubscribeScores = onValue(userScoreRef, (snapshot) => {
       if (snapshot.exists()) {
