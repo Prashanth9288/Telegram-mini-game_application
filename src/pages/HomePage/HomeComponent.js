@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTelegram } from "../../reactContext/TelegramContext.js";
-import { ref, onValue, runTransaction, get, child, update } from "firebase/database";
+import { ref, onValue, runTransaction, get, child, update, query, limitToLast, orderByChild } from "firebase/database";
 import { database } from "../../services/FirebaseConfig";
 import {
   ChevronRight,
@@ -56,64 +56,76 @@ export default function HomeComponent() {
 
     // 1. Listen to Aggregates (Real-time)
     const unsubscribeAggregates = onValue(aggregatesRef, async (snapshot) => {
+      let finalNewsToDisplay = [];
+      let foundTrending = false;
+
+      // STEP 1: Process Trending Data (If exists)
       if (snapshot.exists()) {
         const data = snapshot.val();
         const now = Date.now();
-        // Strict 24h Window
         const twentyFourHoursAgo = now - 24 * 60 * 60 * 1000;
 
-        // Filter & Sort Client-side
-        const rankedNews = Object.values(data)
-          .filter((item) => item.publishedAt >= twentyFourHoursAgo) // Filter past 24h
+        // Filter & Sort Client-side (Trending 24h)
+        const trendingCandidates = Object.values(data)
+          .filter((item) => item.publishedAt >= twentyFourHoursAgo) 
           .sort((a, b) => {
-             // Primary: Likes (Desc)
              if (b.likes !== a.likes) return b.likes - a.likes;
-             // Secondary: Newest (Desc)
              return b.publishedAt - a.publishedAt;
           })
-          .slice(0, 5); // Fetch Top 5 Candidates to ensure we have valid content
+          .slice(0, 5); 
 
-        // Fetch Master Data for Top Items
-        if (rankedNews.length > 0) {
-          try {
-            // Robust Fetching: Handle individual failures without failing all
-            const newsPromises = rankedNews.map((item) =>
-              get(child(ref(database), `news/${item.newsId}`))
-                .then((snap) => {
-                   if (snap.exists()) {
-                     // MERGE: Master data + Aggregate data (likes, publishedAt)
-                     // Ensure we use the Aggregate's publishedAt for consistency if master is missing it
-                     return { 
-                        id: item.newsId, 
-                        ...snap.val(), 
-                        likes: item.likes,
-                        publishedAt: item.publishedAt 
-                     };
-                   }
-                   return null;
-                })
-                .catch(err => {
-                   console.warn(`Failed to fetch news ${item.newsId}`, err);
-                   return null; 
-                })
-            );
-            
-            const fetchedNews = (await Promise.all(newsPromises)).filter(Boolean);
-            
-            // Re-sort to be safe after fetching details (in case we want to show list)
-            // But we mainly need Top 1.
-            setTopNews(fetchedNews);
-          } catch (error) {
-            console.error("Critical error fetching news details:", error);
-            // Fallback: If critical failure, keep previous state or empty?
-            // Safer to not clear if it's a transient network error, but for now we won't overwrite with empty unless empty.
-          }
-        } else {
-          setTopNews([]);
+        if (trendingCandidates.length > 0) {
+           foundTrending = true;
+           // Fetch Master Data for Trending Items
+           try {
+             const newsPromises = trendingCandidates.map((item) =>
+               get(child(ref(database), `news/${item.newsId}`))
+                 .then((snap) => {
+                    if (snap.exists()) {
+                      return { 
+                         id: item.newsId, 
+                         ...snap.val(), 
+                         likes: item.likes,
+                         publishedAt: item.publishedAt 
+                      };
+                    }
+                    return null;
+                 })
+                 .catch(err => { console.warn(err); return null; })
+             );
+             
+             finalNewsToDisplay = (await Promise.all(newsPromises)).filter(Boolean);
+           } catch (error) {
+             console.error("Error fetching trending details:", error);
+           }
         }
-      } else {
-        setTopNews([]);
       }
+
+      // STEP 2: Fallback (If no trending found)
+      // "handle recent post published it should be shown as a top don't show empty"
+      if (!foundTrending || finalNewsToDisplay.length === 0) {
+         try {
+             // Fetch Last 5 News straight from archive
+             const fallbackQuery = query(ref(database, 'news'), orderByChild('publishedAt'), limitToLast(5));
+             const fallbackSnap = await get(fallbackQuery);
+             
+             if (fallbackSnap.exists()) {
+                 const rawFallback = fallbackSnap.val();
+                 // Sort DESC by publishedAt
+                 finalNewsToDisplay = Object.entries(rawFallback)
+                    .map(([key, val]) => ({
+                        id: key,
+                        ...val,
+                        likes: 0 // Default to 0, or could fetch real likes if we wanted, but 0 is standard for new posts
+                    }))
+                    .sort((a, b) => b.publishedAt - a.publishedAt);
+             }
+         } catch(err) {
+             console.error("Fallback fetch failed", err);
+         }
+      }
+
+      setTopNews(finalNewsToDisplay);
       setLoadingNews(false);
     });
 
