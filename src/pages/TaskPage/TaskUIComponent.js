@@ -27,6 +27,9 @@ export default function TasksPage() {
   const [videoTimer, setVideoTimer] = useState(0);
 
   const [activeTaskId, setActiveTaskId] = useState(null);
+  const [activeTask, setActiveTask] = useState(null); // Full task object for modal
+  const [inputCode, setInputCode] = useState(""); // User input for secret code
+  const [codeError, setCodeError] = useState(""); // Error message for verification
   // const [click, setClick] = useState({}); // Removed unused state
 
   useEffect(() => {
@@ -309,157 +312,132 @@ export default function TasksPage() {
     }, 3000);
   };
 
-  /* 
-   * CRITICALLY OPTIMIZED handleTitle
-   * Uses Transactions for Atomic Score Updates
-   * Handles Weekly Progress Tracking
-   * Manages Video URL Versioning
-   */
-  const handleTitle = async (task, taskId) => {
-    const clickBtn = document.getElementById(`clickBtn${taskId}`);
-    const currentText = buttonText[taskId] || "Start Task";
-
-    // UI Feedback Helper
+  // --- SHARED CLAIM LOGIC (Lifted) ---
+  const processClaim = async (taskObj, extraData = {}, onSuccess = null) => {
+    const taskId = taskObj.id;
+    // UI Feedback Helpers
     const setBtnLoading = () => setButtonText(prev => ({ ...prev, [taskId]: "Processing..." }));
     const setBtnFailed = () => {
       setButtonText(prev => ({ ...prev, [taskId]: "Failed" }));
       setTimeout(() => setButtonText(prev => ({ ...prev, [taskId]: "Try Again" })), 2000);
     };
 
-    // --- SHARED CLAIM LOGIC START ---
-    const executeClaim = async (taskObj, extraData = {}) => {
-      setBtnLoading();
-      try {
-        const taskPoints = Number(taskObj.points) || 0;
+    setBtnLoading();
+    try {
+      const taskPoints = Number(taskObj.points) || 0;
 
-        // 1. Transactional Score Update (Prevents Race Conditions)
-        const scoreTransactionResult = await runTransaction(userScoreRef, (currentScoreData) => {
-          if (!currentScoreData) {
-            return {
-              task_score: taskPoints,
-              total_score: taskPoints,
-              weekly_points: taskPoints,
-              weekly_updated_at: Date.now(),
-              task_updated_at: Date.now(),
-              farming_score: 0, game_score: 0, network_score: 0, news_score: 0
-            };
-          }
-
-          // Calculate new totals safely
-          const new_task_score = (Number(currentScoreData.task_score) || 0) + taskPoints;
-          const new_total_score = (
-            (Number(currentScoreData.farming_score) || 0) +
-            (Number(currentScoreData.game_score) || 0) +
-            (Number(currentScoreData.network_score) || 0) +
-            (Number(currentScoreData.news_score) || 0) +
-            new_task_score
-          );
-
-          // Weekly Points Logic (with Reset)
-          let new_weekly_points = (Number(currentScoreData.weekly_points) || 0);
-          if (isSameWeek(currentScoreData.weekly_updated_at)) {
-            new_weekly_points += taskPoints;
-          } else {
-            new_weekly_points = taskPoints; // Reset for new week
-          }
-
+      // 1. Transactional Score Update
+      const scoreTransactionResult = await runTransaction(userScoreRef, (currentScoreData) => {
+        if (!currentScoreData) {
           return {
-            ...currentScoreData,
-            task_score: new_task_score,
-            total_score: new_total_score,
-            weekly_points: new_weekly_points,
-            weekly_updated_at: Date.now(), // Always update timestamp to keep it fresh
-            task_updated_at: Date.now()
+            task_score: taskPoints,
+            total_score: taskPoints,
+            weekly_points: taskPoints,
+            weekly_updated_at: Date.now(),
+            task_updated_at: Date.now(),
+            farming_score: 0, game_score: 0, network_score: 0, news_score: 0
           };
-        });
+        }
 
-        if (scoreTransactionResult.committed) {
-          // 2. Update Task Status (Atomic per user action)
-          // Store specific data like videoUrl to handle Admin updates
-          const claimData = {
-            lastClaimed: Date.now(),
-            ...extraData
-          };
+        const new_task_score = (Number(currentScoreData.task_score) || 0) + taskPoints;
+        const new_total_score = (
+          (Number(currentScoreData.farming_score) || 0) +
+          (Number(currentScoreData.game_score) || 0) +
+          (Number(currentScoreData.network_score) || 0) +
+          (Number(currentScoreData.news_score) || 0) +
+          new_task_score
+        );
 
-          await update(ref(database, `connections/${user.id}/${taskId}`), claimData);
+        let new_weekly_points = (Number(currentScoreData.weekly_points) || 0);
+        if (isSameWeek(currentScoreData.weekly_updated_at)) {
+          new_weekly_points += taskPoints;
+        } else {
+          new_weekly_points = taskPoints;
+        }
 
-          // Reset game task completed status after claiming to ensure daily cycle works properly
-          if (taskObj.type === 'game') {
-            await update(ref(database, `connections/${user.id}/tasks/daily`), { game: false });
-          }
+        return {
+          ...currentScoreData,
+          task_score: new_task_score,
+          total_score: new_total_score,
+          weekly_points: new_weekly_points,
+          weekly_updated_at: Date.now(),
+          task_updated_at: Date.now()
+        };
+      });
 
-          // 3. Weekly Progress Logic
-          // Check if this was a Daily Task and if we finished the day
-          if (taskObj.category === 'daily' || taskObj.type === 'news' || taskObj.type === 'game' || taskObj.type === 'watch') {
-            // Optimization: We verify client-side first to avoid spamming transactions
-            // Filter *all* daily tasks from our local 'tasks' state
-            const currentDailyTasks = tasks.filter(t =>
-              (t.category === 'daily') ||
-              (t.type === 'game') ||
-              (t.type === 'news')
-            );
+      if (scoreTransactionResult.committed) {
+        // 2. Update Task Status
+        const claimData = {
+          lastClaimed: Date.now(),
+          ...extraData
+        };
 
-            // Check if ALL are done (including the one we just claimed)
-            // We pass the new status for *this* task explicitly to the checker helper logic or just rely on 'userTasks' locally updated?
-            // React state 'userTasks' won't be updated yet. We need to be careful.
-            const allDone = currentDailyTasks.every(t => {
-              if (t.id === taskId) return true; // Optimistically assume this one is done
-              return isTaskDone(t);
-            });
+        await update(ref(database, `connections/${user.id}/${taskId}`), claimData);
 
-            if (allDone) {
-              // Check and increment weekly progress transactionally
-              const weeklyRef = ref(database, `users/${user.id}/weekly_progress`);
-              await runTransaction(weeklyRef, (currentWeekly) => {
-                const now = new Date();
-                // Simple date string for unique day check
-                const todayStr = now.toISOString().split('T')[0];
+        if (taskObj.type === 'game') {
+          await update(ref(database, `connections/${user.id}/tasks/daily`), { game: false });
+        }
 
-                if (!currentWeekly) {
-                  return { current_week_days: 1, last_completed_date: todayStr };
-                }
-
-                // If already incremented for today, ignore
-                if (currentWeekly.last_completed_date === todayStr) {
-                  return currentWeekly; // No change
-                }
-
-                // Check for Week Reset
-                // If the last completion was NOT in the same week, reset count to 1
-                // Note: We use 'last_completed_date' as the reference point
-                let newDays;
-                if (isSameWeek(currentWeekly.last_completed_date)) {
-                  newDays = (currentWeekly.current_week_days || 0) + 1;
-                } else {
-                  newDays = 1; // New Week -> First day completed
-                }
-
-                return {
-                  ...currentWeekly,
-                  current_week_days: Math.min(newDays, 7),
-                  last_completed_date: todayStr
-                };
-              });
-            }
-          }
-
-          // History Log
-          addHistoryLog(userId, {
-            action: `Task Reward: ${taskObj.title}`,
-            points: taskPoints,
-            type: taskObj.type || 'task',
+        // 3. Weekly Progress Logic
+        if (taskObj.category === 'daily' || taskObj.type === 'news' || taskObj.type === 'game' || taskObj.type === 'watch') {
+          const currentDailyTasks = tasks.filter(t =>
+            (t.category === 'daily') || (t.type === 'game') || (t.type === 'news')
+          );
+          const allDone = currentDailyTasks.every(t => {
+            if (t.id === taskId) return true;
+            return isTaskDone(t);
           });
 
-          if (clickBtn) clickBtn.style.display = "none";
-        } else {
-          throw new Error("Transaction failed");
+          if (allDone) {
+            const weeklyRef = ref(database, `users/${user.id}/weekly_progress`);
+            await runTransaction(weeklyRef, (currentWeekly) => {
+              const now = new Date();
+              const todayStr = now.toISOString().split('T')[0];
+              if (!currentWeekly) return { current_week_days: 1, last_completed_date: todayStr };
+              if (currentWeekly.last_completed_date === todayStr) return currentWeekly;
+              
+              let newDays;
+              if (isSameWeek(currentWeekly.last_completed_date)) {
+                newDays = (currentWeekly.current_week_days || 0) + 1;
+              } else {
+                newDays = 1;
+              }
+              return { ...currentWeekly, current_week_days: Math.min(newDays, 7), last_completed_date: todayStr };
+            });
+          }
         }
-      } catch (error) {
-        console.error("Claim Error:", error);
-        setBtnFailed();
+
+        // History Log
+        addHistoryLog(userId, {
+          action: `Task Reward: ${taskObj.title}`,
+          points: taskPoints,
+          type: taskObj.type || 'task',
+        });
+
+        // Hide button visually if needed (Old logic)
+        const clickBtn = document.getElementById(`clickBtn${taskId}`);
+        if (clickBtn) clickBtn.style.display = "none";
+        
+        if (onSuccess) onSuccess();
+
+      } else {
+        throw new Error("Transaction failed");
       }
-    };
-    // --- SHARED CLAIM LOGIC END ---
+    } catch (error) {
+      console.error("Claim Error:", error);
+      setBtnFailed();
+    }
+  };
+
+  /* 
+   * CRITICALLY OPTIMIZED handleTitle
+   */
+  const handleTitle = async (task, taskId) => {
+    const currentText = buttonText[taskId] || "Start Task";
+    
+    // Legacy mapping for handleTitle calling processClaim
+    // We don't need to redefine executeClaim here, we use processClaim.
+
 
     switch (task.type?.toLowerCase()) {
       case "watch":
@@ -473,10 +451,11 @@ export default function TasksPage() {
             setSelectedVideo(videoUrl);
             setVideoTimer(30);
             setActiveTaskId(taskId);
+            setActiveTask(task); // Set full task object/context
           }
         } else if (!isTaskDone(task) || currentText === "Claim") {
           // Pass videoUrl to be stored in the claim record
-          executeClaim(task, { videoUrl: task.videoUrl || task.url });
+          processClaim(task, { videoUrl: task.videoUrl || task.url });
         }
         break;
 
@@ -488,7 +467,7 @@ export default function TasksPage() {
           const { chatId, chatType } = await handleChatId();
           startMembershipCheck(taskId, chatId, chatType);
         } else if (currentText === "Claim" && !isTaskDone(task)) {
-          executeClaim(task);
+          processClaim(task);
         }
         break;
 
@@ -503,7 +482,7 @@ export default function TasksPage() {
       case "game":
         // Check if game is completed or explicitly ready to claim
         if (gameCompleted || (userTasks[taskId] === false) || currentText === "Claim") {
-          executeClaim(task);
+          processClaim(task);
         } else {
           // OPTIMIZATION: Immediate navigation
           setTimeout(() => navigate("/game"), 0);
@@ -516,7 +495,7 @@ export default function TasksPage() {
           // Check if ready to claim (e.g. read 5 news)
           // Hardcoded 5 matching the logic user requested/implied
           if (newsCount >= 5) {
-            executeClaim(task);
+            processClaim(task);
           } else {
             // Not enough news read -> Navigate
             setTimeout(() => navigate("/news"), 0);
@@ -531,7 +510,7 @@ export default function TasksPage() {
         // Logic for Referral Claim
         if (!isTaskDone(task)) {
           if (task.completed >= task.total) {
-            executeClaim(task);
+            processClaim(task);
           } else {
             // Navigate to invite page if not enough referrals
             setTimeout(() => navigate("/network"), 0);
@@ -542,7 +521,7 @@ export default function TasksPage() {
       case "weekly":
         if (!isTaskDone(task)) {
           if (task.completed >= task.total) {
-            executeClaim(task);
+            processClaim(task);
           } else {
             // Visual feedback that it's not ready
             const updatedButtonTexts = { ...buttonText };
@@ -842,26 +821,76 @@ export default function TasksPage() {
                 allowFullScreen
               ></iframe>
             </div>
-            <div className="p-4 flex justify-between items-center bg-white/5">
-              <div className="text-white/70 text-sm">
-                {videoTimer > 0 ? `Reward available in ${videoTimer}s` : "Review complete!"}
+            <div className="p-4 bg-white/5 space-y-3">
+              <div className="flex justify-between items-center">
+                <div className="text-white/70 text-sm">
+                  {videoTimer > 0 
+                  ? `Reward available in ${videoTimer}s` 
+                  : (activeTask?.secretCode ? "Enter the secret code from the video" : "Review complete!")}
+                </div>
+                
+                {/* Standard Claim/Unlock Button (No Code) */}
+                {!activeTask?.secretCode && (
+                  <button
+                    disabled={videoTimer > 0}
+                    onClick={async () => {
+                      if (activeTaskId) {
+                        // Mark as ready to claim (unlocks persistent claim button)
+                        await update(userTasksRef, { [activeTaskId]: false });
+                        setButtonText(prev => ({ ...prev, [activeTaskId]: "Claim" }));
+                      }
+                      setSelectedVideo(null);
+                      setActiveTask(null);
+                    }}
+                    className={`px-4 py-2 rounded-lg font-medium transition-colors ${videoTimer > 0
+                      ? "bg-gray-600 text-gray-400 cursor-not-allowed"
+                      : "bg-green-600 hover:bg-green-700 text-white"
+                      }`}
+                  >
+                    {videoTimer > 0 ? `Wait ${videoTimer}s` : "Claim Reward"}
+                  </button>
+                )}
               </div>
-              <button
-                disabled={videoTimer > 0}
-                onClick={async () => {
-                  if (activeTaskId) {
-                    await update(userTasksRef, { [activeTaskId]: false });
-                    setButtonText(prev => ({ ...prev, [activeTaskId]: "Claim" }));
-                  }
-                  setSelectedVideo(null);
-                }}
-                className={`px-4 py-2 rounded-lg font-medium transition-colors ${videoTimer > 0
-                  ? "bg-gray-600 text-gray-400 cursor-not-allowed"
-                  : "bg-green-600 hover:bg-green-700 text-white"
-                  }`}
-              >
-                {videoTimer > 0 ? `Wait ${videoTimer}s` : "Claim Reward"}
-              </button>
+
+              {/* Secret Code Input Section */}
+              {activeTask?.secretCode && videoTimer <= 0 && (
+                <div className="flex flex-col gap-2 w-full animate-in fade-in slide-in-from-bottom-2">
+                   <input 
+                     type="text" 
+                     placeholder="Enter Secret Code" 
+                     value={inputCode}
+                     onChange={(e) => {
+                       setInputCode(e.target.value);
+                       setCodeError(""); 
+                     }}
+                     className="w-full px-3 py-2 bg-black/40 border border-white/20 rounded-md text-white placeholder:text-gray-500 focus:outline-none focus:border-amber-400"
+                   />
+                   {codeError && <span className="text-red-400 text-xs">{codeError}</span>}
+                   
+                   <button
+                    onClick={async () => {
+                      const cleanInput = inputCode.trim().toLowerCase();
+                      const cleanSecret = activeTask.secretCode.trim().toLowerCase();
+                      
+                      if (cleanInput === cleanSecret) {
+                         // Correct Code -> Claim Immediately
+                         await processClaim(activeTask, { videoUrl: activeTask.videoUrl || activeTask.url }, () => {
+                           // On Success
+                           setSelectedVideo(null);
+                           setActiveTask(null);
+                           setInputCode("");
+                           setCodeError("");
+                         });
+                      } else {
+                         setCodeError("Incorrect code. Please watch the video again.");
+                      }
+                    }}
+                    className="w-full py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-lg font-bold transition-colors"
+                  >
+                    Verify & Claim
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
