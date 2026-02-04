@@ -131,7 +131,7 @@ export const ReferralProvider = ({ children }) => {
         .substring(0, 12);
 
       // Use the environment variable for bot username, fallback to a placeholder if missing
-      const botUsername = process.env.REACT_APP_BOT_USERNAME || 'Web3TodayGameAppTelegram_bot';
+      const botUsername = process.env.REACT_APP_BOT_USERNAME || 'fruitgameapplication_bot';
 
       // BotFather is configured! We can now use 'startapp' for correct tracking.
       // Format: https://t.me/BOT_USERNAME?startapp=ref_CODE_USERID
