@@ -45,7 +45,7 @@ export default function TasksPage() {
 
   // const [userTasks, setUserTasks] = useState({}); // Context
   const [gameCompleted, setGameCompleted] = useState(false);
-  const [newsCount, setnewsCount] = useState(0);
+  const [newsCount, setNewsCount] = useState(0);
   const [localScores, setLocalScores] = useState(null);
   const [weeklyProgressData, setWeeklyProgressData] = useState(null);
 
@@ -162,10 +162,10 @@ export default function TasksPage() {
     });
 
     return () => {
-      unsubscribeTasks();
+      // unsubscribeTasks();
       unsubscribeGame();
       unsubscribeNews();
-      unsubscribeUserTasks();
+      // unsubscribeUserTasks();
       unsubscribeScores();
       unsubscribeWeekly();
     };
