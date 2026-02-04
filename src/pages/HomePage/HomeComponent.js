@@ -82,11 +82,15 @@ export default function HomeComponent() {
                get(child(ref(database), `news/${item.newsId}`))
                  .then((snap) => {
                     if (snap.exists()) {
+                      const masterData = snap.val();
+                      // DATA MERGE:
+                      // - Use Master Data (Title, Image, Global Counts)
+                      // - Ensure we have a 'likes' count (Global preferred)
                       return { 
                          id: item.newsId, 
-                         ...snap.val(), 
-                         likes: item.likes,
-                         publishedAt: item.publishedAt 
+                         ...masterData, 
+                         likes: masterData.likes || item.likes || 0, 
+                         publishedAt: item.publishedAt // Use aggregate timestamp for strict sorting checks
                       };
                     }
                     return null;
@@ -117,7 +121,7 @@ export default function HomeComponent() {
                     .map(([key, val]) => ({
                         id: key,
                         ...val,
-                        likes: 0 // Default to 0
+                        likes: val.likes || 0 // Use Global Count if available
                     }))
                     .sort((a, b) => {
                        const dateA = a.publishedAt || 0;
@@ -176,24 +180,26 @@ export default function HomeComponent() {
       };
       await update(ref(database), updates);
 
-      // 2. Transaction on Aggregate (Conditional)
+      // 2. GLOBAL COUNT: Permanent increment on the News Item itself
+      const newsLikesRef = ref(database, `news/${newsId}/likes`);
+      runTransaction(newsLikesRef, (curr) => (curr || 0) + 1);
+
+      // 3. TRENDING COUNT: 24h Rolling Score (Conditional)
       const now = Date.now();
       const cutoff = now - 24 * 60 * 60 * 1000;
       
-      // Strict Guard: Only update count if news is actually young enough
+      // Strict Guard: Only update "Trending" score if news is recent
       if (fullItem.publishedAt && fullItem.publishedAt >= cutoff) {
           const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
           await runTransaction(aggRef, (currentLikes) => {
             return (currentLikes || 0) + 1;
           });
       } else {
-          console.log("News is older than 24h, like recorded in history but not trending score.");
+          console.log("News is older than 24h: Like recorded globally, but not on trending 24h score.");
       }
 
     } catch (error) {
        console.error("Like failed:", error);
-       // Revert Optimistic Update?
-       // For a simple like button, simpler to check 'onValue' to fix it eventually.
     }
   };
 
