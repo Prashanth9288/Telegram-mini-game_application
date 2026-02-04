@@ -59,31 +59,54 @@ export default function HomeComponent() {
       if (snapshot.exists()) {
         const data = snapshot.val();
         const now = Date.now();
+        // Strict 24h Window
         const twentyFourHoursAgo = now - 24 * 60 * 60 * 1000;
 
         // Filter & Sort Client-side
         const rankedNews = Object.values(data)
           .filter((item) => item.publishedAt >= twentyFourHoursAgo) // Filter past 24h
-          .sort((a, b) => b.likes - a.likes) // Sort by likes desc
-          .slice(0, 4); // Top 4
+          .sort((a, b) => {
+             // Primary: Likes (Desc)
+             if (b.likes !== a.likes) return b.likes - a.likes;
+             // Secondary: Newest (Desc)
+             return b.publishedAt - a.publishedAt;
+          })
+          .slice(0, 5); // Fetch Top 5 Candidates to ensure we have valid content
 
         // Fetch Master Data for Top Items
         if (rankedNews.length > 0) {
           try {
+            // Robust Fetching: Handle individual failures without failing all
             const newsPromises = rankedNews.map((item) =>
-              get(child(ref(database), `news/${item.newsId}`)).then((snap) => {
-                 if (snap.exists()) {
-                   return { id: item.newsId, ...snap.val(), likes: item.likes };
-                 }
-                 return null;
-              })
+              get(child(ref(database), `news/${item.newsId}`))
+                .then((snap) => {
+                   if (snap.exists()) {
+                     // MERGE: Master data + Aggregate data (likes, publishedAt)
+                     // Ensure we use the Aggregate's publishedAt for consistency if master is missing it
+                     return { 
+                        id: item.newsId, 
+                        ...snap.val(), 
+                        likes: item.likes,
+                        publishedAt: item.publishedAt 
+                     };
+                   }
+                   return null;
+                })
+                .catch(err => {
+                   console.warn(`Failed to fetch news ${item.newsId}`, err);
+                   return null; 
+                })
             );
             
             const fetchedNews = (await Promise.all(newsPromises)).filter(Boolean);
+            
+            // Re-sort to be safe after fetching details (in case we want to show list)
+            // But we mainly need Top 1.
             setTopNews(fetchedNews);
           } catch (error) {
-            console.error("Error fetching news details:", error);
-            // Fallback or empty state handled by UI
+            console.error("Critical error fetching news details:", error);
+            // Fallback: If critical failure, keep previous state or empty?
+            // Safer to not clear if it's a transient network error, but for now we won't overwrite with empty unless empty.
           }
         } else {
           setTopNews([]);
@@ -128,30 +151,52 @@ export default function HomeComponent() {
     };
   }, [user.id]);
 
-  // Like Handling Logic (Transaction)
-  const handleLike = async (e, newsId) => {
+  // Like Handling Logic (Transaction + Guard)
+  const handleLike = async (e, newsItem) => {
     e.stopPropagation(); // Prevent card click
-    if (!newsId || !user.id) return;
+    
+    // Support both direct ID pass or object override
+    const newsId = typeof newsItem === 'object' ? newsItem.id : newsItem;
+    // We need the full item for validation (publishedAt). 
+    // If passed ID, find in topNews.
+    const fullItem = typeof newsItem === 'object' ? newsItem : topNews.find(n => n.id === newsId);
+
+    if (!newsId || !user.id || !fullItem) return;
+
+    // Optimistic Update
+    setTopNews(prev => prev.map(item => {
+        if (item.id === newsId) {
+            return { ...item, likes: (item.likes || 0) + 1 };
+        }
+        return item;
+    }));
 
     try {
-      // 1. Write to /news_likes
+      // 1. Write to /news_likes (History - Always allowed)
       const updates = {};
       updates[`/news_likes/${newsId}/${user.id}`] = {
         likedAt: Date.now()
       };
-      
-      // We can do this in parallel or fire and forget the atomic update separately
-      // Requirement: "1. Write ... 2. Atomically update"
-      update(ref(database), updates);
+      await update(ref(database), updates);
 
-      // 2. Transaction on Aggregate
-      const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
-      runTransaction(aggRef, (currentLikes) => {
-        return (currentLikes || 0) + 1;
-      });
+      // 2. Transaction on Aggregate (Conditional)
+      const now = Date.now();
+      const cutoff = now - 24 * 60 * 60 * 1000;
+      
+      // Strict Guard: Only update count if news is actually young enough
+      if (fullItem.publishedAt && fullItem.publishedAt >= cutoff) {
+          const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
+          await runTransaction(aggRef, (currentLikes) => {
+            return (currentLikes || 0) + 1;
+          });
+      } else {
+          console.log("News is older than 24h, like recorded in history but not trending score.");
+      }
 
     } catch (error) {
        console.error("Like failed:", error);
+       // Revert Optimistic Update?
+       // For a simple like button, simpler to check 'onValue' to fix it eventually.
     }
   };
 
@@ -432,12 +477,12 @@ export default function HomeComponent() {
                       {/* Like Button */}
                       <Button
                         variant="ghost" 
-                        size="icon"
-                        className="absolute bottom-3 right-3 bg-black/40 hover:bg-red-500/20 rounded-full h-10 w-10 text-white backdrop-blur-sm"
-                        onClick={(e) => handleLike(e, topNews[0].id)}
+                        size="sm" // Changed to sm for text + icon
+                        className="absolute bottom-3 right-3 bg-black/40 hover:bg-red-500/20 rounded-full h-10 px-3 text-white backdrop-blur-sm flex items-center gap-1.5"
+                        onClick={(e) => handleLike(e, topNews[0])}
                       >
-                         <Heart className="h-6 w-6 text-white fill-transparent hover:fill-red-500 hover:text-red-500 transition-colors" />
-                         {/* Optional: Show like count if desired, but not strictly requested in UI spec, keeping it clean */}
+                         <Heart className={`h-5 w-5 transition-colors ${topNews[0].likes > 0 ? "fill-red-500 text-red-500" : "text-white"}`} />
+                         <span className="font-bold text-sm">{topNews[0].likes || 0}</span>
                       </Button>
                     </div>
                     <CardContent className="p-4">
