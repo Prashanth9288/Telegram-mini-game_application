@@ -105,20 +105,25 @@ export default function HomeComponent() {
       // "handle recent post published it should be shown as a top don't show empty"
       if (!foundTrending || finalNewsToDisplay.length === 0) {
          try {
-             // Fetch Last 5 News straight from archive
-             const fallbackQuery = query(ref(database, 'news'), orderByChild('publishedAt'), limitToLast(5));
+             // Fetch Last 10 News straight from archive using Natural Order (Key)
+             // This avoids "Index not defined" errors for publishedAt
+             const fallbackQuery = query(ref(database, 'news'), limitToLast(10));
              const fallbackSnap = await get(fallbackQuery);
              
              if (fallbackSnap.exists()) {
                  const rawFallback = fallbackSnap.val();
-                 // Sort DESC by publishedAt
+                 // Sort DESC by publishedAt (Client Side)
                  finalNewsToDisplay = Object.entries(rawFallback)
                     .map(([key, val]) => ({
                         id: key,
                         ...val,
-                        likes: 0 // Default to 0, or could fetch real likes if we wanted, but 0 is standard for new posts
+                        likes: 0 // Default to 0
                     }))
-                    .sort((a, b) => b.publishedAt - a.publishedAt);
+                    .sort((a, b) => {
+                       const dateA = a.publishedAt || 0;
+                       const dateB = b.publishedAt || 0;
+                       return dateB - dateA;
+                    });
              }
          } catch(err) {
              console.error("Fallback fetch failed", err);
