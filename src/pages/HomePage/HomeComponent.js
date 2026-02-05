@@ -78,25 +78,22 @@ export default function HomeComponent() {
            foundTrending = true;
            // Fetch Master Data for Trending Items
            try {
-             const newsPromises = trendingCandidates.map((item) =>
-               get(child(ref(database), `news/${item.newsId}`))
-                 .then((snap) => {
-                    if (snap.exists()) {
-                      const masterData = snap.val();
-                      // DATA MERGE:
-                      // - Use Master Data (Title, Image, Global Counts)
-                      // - Ensure we have a 'likes' count (Global preferred)
-                      return { 
-                         id: item.newsId, 
-                         ...masterData, 
-                         likes: masterData.likes || item.likes || 0, 
-                         publishedAt: item.publishedAt // Use aggregate timestamp for strict sorting checks
-                      };
-                    }
-                    return null;
-                 })
-                 .catch(err => { console.warn(err); return null; })
-             );
+             const newsPromises = trendingCandidates.map(async (item) => {
+               const snap = await get(child(ref(database), `news/${item.newsId}`));
+               if (!snap.exists()) return null;
+
+               const masterData = snap.val();
+               // Check if current user liked this
+               const likeSnap = await get(child(ref(database), `news_likes/${item.newsId}/${user.id}`));
+               
+               return { 
+                  id: item.newsId, 
+                  ...masterData, 
+                  likes: masterData.likes || item.likes || 0,
+                  isLikedByCurrentUser: likeSnap.exists(), // LOAD INITIAL STATE
+                  publishedAt: item.publishedAt 
+               };
+             });
              
              finalNewsToDisplay = (await Promise.all(newsPromises)).filter(Boolean);
            } catch (error) {
@@ -114,21 +111,28 @@ export default function HomeComponent() {
              const fallbackQuery = query(ref(database, 'news'), limitToLast(10));
              const fallbackSnap = await get(fallbackQuery);
              
-             if (fallbackSnap.exists()) {
-                 const rawFallback = fallbackSnap.val();
-                 // Sort DESC by publishedAt (Client Side)
-                 finalNewsToDisplay = Object.entries(rawFallback)
-                    .map(([key, val]) => ({
+              if (fallbackSnap.exists()) {
+                  const rawFallback = fallbackSnap.val();
+                  // Sort DESC by publishedAt (Client Side)
+                  const fallbackEntries = Object.entries(rawFallback);
+                  
+                  // Parallel Fetch Like Status for these 10 items
+                  const enrichedFallback = await Promise.all(fallbackEntries.map(async ([key, val]) => {
+                      const likeSnap = await get(child(ref(database), `news_likes/${key}/${user.id}`));
+                      return {
                         id: key,
                         ...val,
-                        likes: val.likes || 0 // Use Global Count if available
-                    }))
-                    .sort((a, b) => {
+                        likes: val.likes || 0,
+                        isLikedByCurrentUser: likeSnap.exists()
+                      };
+                  }));
+
+                  finalNewsToDisplay = enrichedFallback.sort((a, b) => {
                        const dateA = a.publishedAt || 0;
                        const dateB = b.publishedAt || 0;
                        return dateB - dateA;
-                    });
-             }
+                  });
+              }
          } catch(err) {
              console.error("Fallback fetch failed", err);
          }
@@ -152,58 +156,74 @@ export default function HomeComponent() {
     };
   }, [user.id]);
 
-  // Like Handling Logic (Transaction + Guard)
+  // Like Handling Logic (Toggle + Global Sync)
   const handleLike = async (e, newsItem) => {
     e.stopPropagation(); // Prevent card click
     
     // Support both direct ID pass or object override
     const newsId = typeof newsItem === 'object' ? newsItem.id : newsItem;
-    
-    // We need the full item for validation (publishedAt). 
-    // If passed ID, find in topNews.
     const fullItem = typeof newsItem === 'object' ? newsItem : topNews.find(n => n.id === newsId);
 
-    if (!newsId || !user.id || !fullItem) return;
+    if (!newsId || !user.id) return;
 
-    // Check if already liked to prevent double counting
     const likeRef = ref(database, `news_likes/${newsId}/${user.id}`);
+    
     try {
         const snapshot = await get(likeRef);
-        if (snapshot.exists()) {
-            console.warn("User already liked this news.");
-            // Optional: Show a toast or feedback
-            return; 
-        }
+        const isLiked = snapshot.exists();
 
-        // Auto-Advance: Remove the liked item from the local list immediately
-        // This gives the "Display next top news" behavior
-        setTopNews(prev => prev.filter(item => item.id !== newsId));
+        // Optimistic UI Update (Toggle)
+        setTopNews(prev => prev.map(item => {
+            if (item.id === newsId) {
+                const currentLikes = item.likes || 0;
+                return { 
+                    ...item, 
+                    likes: isLiked ? Math.max(0, currentLikes - 1) : currentLikes + 1,
+                    isLikedByCurrentUser: !isLiked // Helper for UI styling
+                };
+            }
+            return item;
+        }));
 
-        // 1. Write to /news_likes (History - Always allowed)
         const updates = {};
-        updates[`/news_likes/${newsId}/${user.id}`] = {
-            likedAt: Date.now()
-        };
-        await update(ref(database), updates);
-
-        // 2. GLOBAL COUNT: Permanent increment on the News Item itself
-        const newsLikesRef = ref(database, `news/${newsId}/likes`);
-        runTransaction(newsLikesRef, (curr) => (curr || 0) + 1);
-
-        // 3. TRENDING COUNT: 24h Rolling Score (Conditional)
         const now = Date.now();
         const cutoff = now - 24 * 60 * 60 * 1000;
-        
-        // Strict Guard: Only update "Trending" score if news is recent
-        if (fullItem.publishedAt && fullItem.publishedAt >= cutoff) {
-            const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
-            await runTransaction(aggRef, (currentLikes) => {
-                return (currentLikes || 0) + 1;
-            });
+        const isRecent = fullItem?.publishedAt && fullItem.publishedAt >= cutoff;
+
+        if (isLiked) {
+             // DISLIKE (Remove Vote)
+             updates[`/news_likes/${newsId}/${user.id}`] = null;
+             
+             // Decrement Global
+             const newsLikesRef = ref(database, `news/${newsId}/likes`);
+             runTransaction(newsLikesRef, (curr) => Math.max(0, (curr || 0) - 1));
+
+             // Decrement Trending (if recent)
+             if (isRecent) {
+                 const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
+                 runTransaction(aggRef, (curr) => Math.max(0, (curr || 0) - 1));
+             }
+
+        } else {
+             // LIKE (Add Vote)
+             updates[`/news_likes/${newsId}/${user.id}`] = { likedAt: now };
+             
+             // Increment Global
+             const newsLikesRef = ref(database, `news/${newsId}/likes`);
+             runTransaction(newsLikesRef, (curr) => (curr || 0) + 1);
+
+             // Increment Trending (if recent)
+             if (isRecent) {
+                 const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
+                 runTransaction(aggRef, (curr) => (curr || 0) + 1);
+             }
         }
         
+        await update(ref(database), updates);
+
     } catch (error) {
-       console.error("Like failed:", error);
+       console.error("Like toggle failed:", error);
+       // Ideally revert UI change here on error
     }
   };
 
@@ -499,7 +519,7 @@ export default function HomeComponent() {
                         className="absolute bottom-3 right-3 bg-black/40 hover:bg-red-500/20 rounded-full h-10 px-3 text-white backdrop-blur-sm flex items-center gap-1.5"
                         onClick={(e) => handleLike(e, topNews[0])}
                       >
-                         <Heart className={`h-5 w-5 transition-colors ${topNews[0].likes > 0 ? "fill-red-500 text-red-500" : "text-white"}`} />
+                         <Heart className={`h-5 w-5 transition-colors ${topNews[0].isLikedByCurrentUser ? "fill-red-500 text-red-500" : "text-white"}`} />
                          <span className="font-bold text-sm">{topNews[0].likes || 0}</span>
                       </Button>
                     </div>

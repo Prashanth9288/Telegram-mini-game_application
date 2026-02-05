@@ -92,22 +92,50 @@ export default function NewsComponent() {
     const userRef = ref(database, `users/${user.id}/Score`);
 
     try {
+    try {
       const snapshot = await get(userRef);
       let updates = {};
 
       if (snapshot.exists()) {
         const userData = snapshot.val();
-        updates.news_score = (userData?.news_score || 0) + 5;
-        updates.total_score = (userData?.total_score || 0) + 5;
-        await update(userRef, updates);
+        updates[`users/${user.id}/Score/news_score`] = (userData?.news_score || 0) + 5;
+        updates[`users/${user.id}/Score/total_score`] = (userData?.total_score || 0) + 5;
       }
+
+      // Mark local daily task as completed
+      updates[`connections/${user.id}/tasks/daily/news/${currentNews.id}`] = dir === "right";
+
+      // GLOBAL LIKE SYNC (New)
+      if (dir === "right") {
+          // Check if already liked globally to prevent double-count (Idempotency)
+          const globalLikeRef = ref(database, `news_likes/${currentNews.id}/${user.id}`);
+          const globalLikeSnap = await get(globalLikeRef);
+
+          if (!globalLikeSnap.exists()) {
+              // 1. Record User Like
+              updates[`news_likes/${currentNews.id}/${user.id}`] = { likedAt: Date.now() };
+              
+              // 2. Increment Global Count
+              const newsLikesRef = ref(database, `news/${currentNews.id}/likes`);
+              runTransaction(newsLikesRef, (curr) => (curr || 0) + 1);
+
+              // 3. Increment Trending Count (if recent)
+              const now = Date.now();
+              const cutoff = now - 24 * 60 * 60 * 1000;
+              const isRecent = currentNews.createdAt && currentNews.createdAt >= cutoff; // Note: NewsComponent uses 'createdAt', Home uses 'publishedAt'. Assuming they map or check both.
+              
+              if (isRecent) {
+                  const aggRef = ref(database, `aggregates/top_news_24h/${currentNews.id}/likes`);
+                  runTransaction(aggRef, (curr) => (curr || 0) + 1);
+              }
+          }
+      }
+
+      await update(ref(database), updates);
 
       // Animate swipe
       const directionOffset = dir === "right" ? 300 : -300;
       await controls.start({ x: directionOffset, opacity: 0 });
-
-      // Mark news as completed
-      await update(taskRef, { [currentNews.id]: dir === "right" });
 
       console.log("News updated:", currentNews.id);
     } catch (err) {
