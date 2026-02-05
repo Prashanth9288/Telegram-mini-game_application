@@ -158,46 +158,50 @@ export default function HomeComponent() {
     
     // Support both direct ID pass or object override
     const newsId = typeof newsItem === 'object' ? newsItem.id : newsItem;
+    
     // We need the full item for validation (publishedAt). 
     // If passed ID, find in topNews.
     const fullItem = typeof newsItem === 'object' ? newsItem : topNews.find(n => n.id === newsId);
 
     if (!newsId || !user.id || !fullItem) return;
 
-    // Optimistic Update
-    setTopNews(prev => prev.map(item => {
-        if (item.id === newsId) {
-            return { ...item, likes: (item.likes || 0) + 1 };
-        }
-        return item;
-    }));
-
+    // Check if already liked to prevent double counting
+    const likeRef = ref(database, `news_likes/${newsId}/${user.id}`);
     try {
-      // 1. Write to /news_likes (History - Always allowed)
-      const updates = {};
-      updates[`/news_likes/${newsId}/${user.id}`] = {
-        likedAt: Date.now()
-      };
-      await update(ref(database), updates);
+        const snapshot = await get(likeRef);
+        if (snapshot.exists()) {
+            console.warn("User already liked this news.");
+            // Optional: Show a toast or feedback
+            return; 
+        }
 
-      // 2. GLOBAL COUNT: Permanent increment on the News Item itself
-      const newsLikesRef = ref(database, `news/${newsId}/likes`);
-      runTransaction(newsLikesRef, (curr) => (curr || 0) + 1);
+        // Auto-Advance: Remove the liked item from the local list immediately
+        // This gives the "Display next top news" behavior
+        setTopNews(prev => prev.filter(item => item.id !== newsId));
 
-      // 3. TRENDING COUNT: 24h Rolling Score (Conditional)
-      const now = Date.now();
-      const cutoff = now - 24 * 60 * 60 * 1000;
-      
-      // Strict Guard: Only update "Trending" score if news is recent
-      if (fullItem.publishedAt && fullItem.publishedAt >= cutoff) {
-          const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
-          await runTransaction(aggRef, (currentLikes) => {
-            return (currentLikes || 0) + 1;
-          });
-      } else {
-          console.log("News is older than 24h: Like recorded globally, but not on trending 24h score.");
-      }
+        // 1. Write to /news_likes (History - Always allowed)
+        const updates = {};
+        updates[`/news_likes/${newsId}/${user.id}`] = {
+            likedAt: Date.now()
+        };
+        await update(ref(database), updates);
 
+        // 2. GLOBAL COUNT: Permanent increment on the News Item itself
+        const newsLikesRef = ref(database, `news/${newsId}/likes`);
+        runTransaction(newsLikesRef, (curr) => (curr || 0) + 1);
+
+        // 3. TRENDING COUNT: 24h Rolling Score (Conditional)
+        const now = Date.now();
+        const cutoff = now - 24 * 60 * 60 * 1000;
+        
+        // Strict Guard: Only update "Trending" score if news is recent
+        if (fullItem.publishedAt && fullItem.publishedAt >= cutoff) {
+            const aggRef = ref(database, `aggregates/top_news_24h/${newsId}/likes`);
+            await runTransaction(aggRef, (currentLikes) => {
+                return (currentLikes || 0) + 1;
+            });
+        }
+        
     } catch (error) {
        console.error("Like failed:", error);
     }
@@ -452,7 +456,18 @@ export default function HomeComponent() {
             {/* Scrollable Content Below */}
             <div className="mt-6">
               {/* News Swipe Card */}
-              <h2 className="text-white-visible text-xl font-bold mb-3 text-white drop-shadow-lg">Today's Top Stories</h2>
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="text-white-visible text-xl font-bold text-white drop-shadow-lg">Today's Top Stories</h2>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  className="text-indigo-200 font-medium hover:bg-indigo-500/20 flex items-center gap-1"
+                  onClick={goNews}
+                >
+                  View All
+                  <ChevronRight className="h-4 w-4" />
+                </Button>
+              </div>
               {/* Fallback layout or Loading State could be improved here, but implementing simple guard for now */}
               {!loadingNews && topNews.length > 0 ? (
                 <motion.div
