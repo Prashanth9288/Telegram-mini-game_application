@@ -45,6 +45,7 @@ export default function HomeComponent() {
 
   // Real-time News State
   const [topNews, setTopNews] = useState([]);
+  const [likedNewsStatus, setLikedNewsStatus] = useState({}); // { [newsId]: boolean }
   const [loadingNews, setLoadingNews] = useState(true);
 
   // Fetch Logic: Listen to aggregates, filter, sort, and fetch details
@@ -138,8 +139,8 @@ export default function HomeComponent() {
          }
       }
 
-      setTopNews(finalNewsToDisplay);
-      setLoadingNews(false);
+       setTopNews(finalNewsToDisplay);
+       setLoadingNews(false);
     });
 
     // Removed Local Tasks/UserTasks Listeners
@@ -150,11 +151,36 @@ export default function HomeComponent() {
 
     return () => {
       unsubscribeAggregates();
-      // unsubscribeTasks();
-      // unsubscribeUserTasks();
       unsubscribeNews();
     };
   }, [user.id]);
+
+  // NEW: Real-time Listener for Like Status
+  // This ensures that even if the aggregate list updates, we maintain a live connection
+  // to the user's "Like" status for every visible item.
+  useEffect(() => {
+    if (topNews.length === 0 || !user.id) return;
+
+    const listeners = [];
+
+    topNews.forEach(item => {
+        const likeRef = ref(database, `news_likes/${item.id}/${user.id}`);
+        // Listen for value changes (Real-time)
+        const unsub = onValue(likeRef, (snapshot) => {
+            const isLiked = snapshot.exists();
+            setLikedNewsStatus(prev => ({
+                ...prev,
+                [item.id]: isLiked
+            }));
+        });
+        listeners.push(unsub);
+    });
+
+    // Cleanup listeners when topNews changes or unmount
+    return () => {
+        listeners.forEach(unsub => unsub());
+    };
+  }, [topNews, user.id]);
 
   // Like Handling Logic (Toggle + Global Sync)
   const handleLike = async (e, newsItem) => {
@@ -166,30 +192,21 @@ export default function HomeComponent() {
 
     if (!newsId || !user.id) return;
 
-    const likeRef = ref(database, `news_likes/${newsId}/${user.id}`);
-    
+    // Use LOCAL STATE as the source of truth for the toggle action
+    // This prevents race conditions from fetching stale data via get()
+    const isLiked = likedNewsStatus[newsId] || false; 
+
+    // Optimistic Update handled by real-time listener, 
+    // BUT we can force a local update if needed for immediate feedback 
+    // (though onValue is usually fast enough). 
+    // We'll trust the listener to update the Heart icon.
+
+    const updates = {};
+    const now = Date.now();
+    const cutoff = now - 24 * 60 * 60 * 1000;
+    const isRecent = fullItem?.publishedAt && fullItem.publishedAt >= cutoff;
+
     try {
-        const snapshot = await get(likeRef);
-        const isLiked = snapshot.exists();
-
-        // Optimistic UI Update (Toggle)
-        setTopNews(prev => prev.map(item => {
-            if (item.id === newsId) {
-                const currentLikes = item.likes || 0;
-                return { 
-                    ...item, 
-                    likes: isLiked ? Math.max(0, currentLikes - 1) : currentLikes + 1,
-                    isLikedByCurrentUser: !isLiked // Helper for UI styling
-                };
-            }
-            return item;
-        }));
-
-        const updates = {};
-        const now = Date.now();
-        const cutoff = now - 24 * 60 * 60 * 1000;
-        const isRecent = fullItem?.publishedAt && fullItem.publishedAt >= cutoff;
-
         if (isLiked) {
              // DISLIKE (Remove Vote)
              updates[`/news_likes/${newsId}/${user.id}`] = null;
@@ -223,7 +240,6 @@ export default function HomeComponent() {
 
     } catch (error) {
        console.error("Like toggle failed:", error);
-       // Ideally revert UI change here on error
     }
   };
 
@@ -519,7 +535,7 @@ export default function HomeComponent() {
                         className="absolute bottom-3 right-3 bg-black/40 hover:bg-red-500/20 rounded-full h-10 px-3 text-white backdrop-blur-sm flex items-center gap-1.5"
                         onClick={(e) => handleLike(e, topNews[0])}
                       >
-                         <Heart className={`h-5 w-5 transition-colors ${topNews[0].isLikedByCurrentUser ? "fill-red-500 text-red-500" : "text-white"}`} />
+                         <Heart className={`h-5 w-5 transition-colors ${likedNewsStatus[topNews[0].id] ? "fill-red-500 text-red-500" : "text-white"}`} />
                          <span className="font-bold text-sm">{topNews[0].likes || 0}</span>
                       </Button>
                     </div>

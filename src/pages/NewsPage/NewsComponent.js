@@ -92,7 +92,6 @@ export default function NewsComponent() {
     const userRef = ref(database, `users/${user.id}/Score`);
 
     try {
-    try {
       const snapshot = await get(userRef);
       let updates = {};
 
